@@ -122,7 +122,8 @@ let FONTE = carregarCache() || DADOS;
 let VENDEDORES = FONTE.vendedores || [];
 let VMAP = Object.fromEntries(VENDEDORES.map(v=>[v.slug,v.nome]));
 let CONTATOS = FONTE.contatos || {};
-const STATUSES = [
+// ----- status por campanha. REATIVAÇÃO = exatamente o conjunto atual, intocado. -----
+const STATUSES_REATIVACAO = [
   { id:"novo",          label:"Não contatado", dot:"#9aa0a6", bg:"#f1f1ef", fg:"#5f6368", ring:"#d8d8d4" },
   { id:"sem_resposta",  label:"Sem resposta",  dot:"#c98a2b", bg:"#fbf1df", fg:"#8a5a12", ring:"#eccf97" },
   { id:"conversando",   label:"Conversando",   dot:"#2f6fed", bg:"#e7effd", fg:"#1f4fb0", ring:"#bcd2f7" },
@@ -130,15 +131,54 @@ const STATUSES = [
   { id:"sem_interesse", label:"Sem interesse", dot:"#b1453b", bg:"#f9e8e6", fg:"#8a3229", ring:"#e7b6b0" },
   { id:"numero_errado", label:"Número errado", dot:"#6b6b6b", bg:"#eceae6", fg:"#4a4a4a", ring:"#cfccc5" },
 ];
-const ST = Object.fromEntries(STATUSES.map(s=>[s.id,s]));
-const REP_ORDER = ["reativou","conversando","sem_interesse","sem_resposta","numero_errado","novo"];
-const REP_GLYPH = {reativou:"✓",conversando:"■",sem_interesse:"✕",sem_resposta:"—",numero_errado:"✗",novo:"■"};
+const STATUSES_INDICACAO = [
+  { id:"novo",          label:"Não contatado",    dot:"#9aa0a6", bg:"#f1f1ef", fg:"#5f6368", ring:"#d8d8d4" },
+  { id:"sem_resposta",  label:"Sem resposta",     dot:"#c98a2b", bg:"#fbf1df", fg:"#8a5a12", ring:"#eccf97" },
+  { id:"conversando",   label:"Conversando",      dot:"#2f6fed", bg:"#e7effd", fg:"#1f4fb0", ring:"#bcd2f7" },
+  { id:"indicou",       label:"Indicou",          dot:"#1f9d5b", bg:"#e3f5ea", fg:"#16703f", ring:"#a8e0c0" },
+  { id:"nao_quis",      label:"Não quis indicar", dot:"#b1453b", bg:"#f9e8e6", fg:"#8a3229", ring:"#e7b6b0" },
+  { id:"numero_errado", label:"Número errado",    dot:"#6b6b6b", bg:"#eceae6", fg:"#4a4a4a", ring:"#cfccc5" },
+];
+// STATUSES/ST/REP_ORDER/REP_GLYPH apontam para a campanha atual (definidos por aplicarCampanha).
+let STATUSES, ST, REP_ORDER, REP_GLYPH;
+let campanhaAtual="reativacao";
 const SKEY="reativa_estado_v3", PKEY="reativa_pending_v3";
 const DEFAULT_MSG="Olá {nome}! Aqui é o {vendedor}, do Grêmio Português. Tudo bem? Estou entrando em contato sobre o seu retorno ao clube. Você teria um minuto?";
+const DEFAULT_MSG_INDICACAO="Olá {nome}! Aqui é o {vendedor}, do Grêmio Português. Tudo bem? Estamos abrindo vagas para novos sócios por indicação de quem já é da casa. Você teria alguém para indicar?";
+const CAMPANHAS={
+  reativacao:{ id:"reativacao", label:"Reativação", statuses:STATUSES_REATIVACAO,
+    order:["reativou","conversando","sem_interesse","sem_resposta","numero_errado","novo"],
+    glyph:{reativou:"✓",conversando:"■",sem_interesse:"✕",sem_resposta:"—",numero_errado:"✗",novo:"■"},
+    relTitulo:"Relatório de Reativações", msgPadrao:DEFAULT_MSG },
+  indicacao:{ id:"indicacao", label:"Indicação", statuses:STATUSES_INDICACAO,
+    order:["indicou","conversando","nao_quis","sem_resposta","numero_errado","novo"],
+    glyph:{indicou:"✓",conversando:"■",nao_quis:"✕",sem_resposta:"—",numero_errado:"✗",novo:"■"},
+    relTitulo:"Relatório de Indicações", msgPadrao:DEFAULT_MSG_INDICACAO },
+};
+function aplicarCampanha(camp){
+  campanhaAtual = CAMPANHAS[camp]?camp:"reativacao";
+  const c=CAMPANHAS[campanhaAtual];
+  STATUSES=c.statuses; ST=Object.fromEntries(STATUSES.map(s=>[s.id,s]));
+  REP_ORDER=c.order; REP_GLYPH=c.glyph;
+}
+aplicarCampanha("reativacao");
+function campanhasDe(slug){ return [...new Set(contatosDe(slug).map(k=>k.campanha||"reativacao"))]; }
+function definirCampanhaPadrao(slug){ const cs=campanhasDe(slug); aplicarCampanha(cs.includes("reativacao")||!cs.length?"reativacao":cs[0]); }
+function contatosCamp(slug){ return contatosDe(slug).filter(k=>(k.campanha||"reativacao")===campanhaAtual); }
 
 let estado={}, pending={}, cfgMsgs={};
 try{ estado=JSON.parse(localStorage.getItem(SKEY))||{} }catch(e){ estado={} }
 try{ pending=JSON.parse(localStorage.getItem(PKEY))||{} }catch(e){ pending={} }
+
+// ----- indicados (campanha de indicação): cache local + fila offline, como o progresso -----
+const IKEY="reativa_indicados_v1", IPKEY="reativa_indic_pending_v1";
+let indicados={}, indPending={}, indForm=null;   // indicados: contato_id -> [ {id,contato_id,vendedor,nome,telefone,observacao} ]
+try{ indicados=JSON.parse(localStorage.getItem(IKEY))||{} }catch(e){ indicados={} }
+try{ indPending=JSON.parse(localStorage.getItem(IPKEY))||{} }catch(e){ indPending={} }
+function uuid(){ if(typeof crypto!=="undefined"&&crypto.randomUUID){ try{ return crypto.randomUUID(); }catch(e){} } return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,c=>{ const r=Math.random()*16|0, v=c==="x"?r:(r&0x3|0x8); return v.toString(16); }); }
+function indDe(cid){ return indicados[cid]||[]; }
+function salvarIndLocal(){ try{ localStorage.setItem(IKEY,JSON.stringify(indicados)) }catch(e){} }
+function salvarIndPending(){ try{ localStorage.setItem(IPKEY,JSON.stringify(indPending)) }catch(e){} }
 
 let vendAtual=null, filtroStatus="novo", filtroLista="todas", busca="", cfgOpen=false;
 let telaImport=false;   // quando true, render() não redesenha (evita sair da tela de importar/migrar ao perder/ganhar foco)
@@ -153,7 +193,8 @@ function savePending(){ try{ localStorage.setItem(PKEY,JSON.stringify(pending)) 
 function reg(id){ return estado[id]||{status:"novo",nota:"",atualizado:null} }
 function nowISO(){ return new Date().toISOString() }
 function contatosDe(slug){ return CONTATOS[slug]||[] }
-function msgDe(slug){ return cfgMsgs[slug]||DEFAULT_MSG }
+function cfgKey(slug,camp){ camp=camp||campanhaAtual; return camp==="indicacao"?slug+":indicacao":slug; }  // reativação = chave antiga (compatível)
+function msgDe(slug,camp){ camp=camp||campanhaAtual; return cfgMsgs[cfgKey(slug,camp)]||CAMPANHAS[camp].msgPadrao; }
 
 function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])) }
 function digits(t){ return String(t).replace(/\D/g,"") }
@@ -166,7 +207,7 @@ function waLink(tel,nome,slug){ const d=digits(tel); const full=d.startsWith("55
 function fmtData(v){ if(!v)return""; const d=new Date(v); if(isNaN(d))return""; return d.toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit"}) }
 function dataExtenso(){ return new Date().toLocaleDateString("pt-BR",{day:"2-digit",month:"long",year:"numeric"}) }
 
-function statsDe(slug){ const arr=contatosDe(slug); const c={total:arr.length,trabalhados:0}; STATUSES.forEach(s=>c[s.id]=0); arr.forEach(k=>{ const st=reg(k.id).status; c[st]=(c[st]||0)+1; if(st!=="novo")c.trabalhados++ }); return c; }
+function statsDe(slug,arr){ arr=arr||contatosDe(slug); const c={total:arr.length,trabalhados:0}; STATUSES.forEach(s=>c[s.id]=0); arr.forEach(k=>{ const st=reg(k.id).status; c[st]=(c[st]||0)+1; if(st!=="novo")c.trabalhados++ }); return c; }
 
 // ---------------- sync ----------------
 async function pullRemote(){
@@ -175,7 +216,7 @@ async function pullRemote(){
     const { data, error } = await sb.from("progresso").select("id,status,nota,tel_usado,atualizado");
     if(error) throw error;
     (data||[]).forEach(row=>{
-      if(String(row.id).indexOf("__cfg__:")===0){ const slug=row.id.split(":")[1]; if(row.nota) cfgMsgs[slug]=row.nota; return; }
+      if(String(row.id).indexOf("__cfg__:")===0){ const key=String(row.id).slice(8); if(row.nota) cfgMsgs[key]=row.nota; return; }
       const cur=estado[row.id];
       if(!cur||!cur.atualizado||(row.atualizado||"")>=(cur.atualizado||"")){
         estado[row.id]={status:row.status||"novo",nota:row.nota||"",telUsado:row.tel_usado||"",atualizado:row.atualizado||null};
@@ -187,7 +228,7 @@ async function pullRemote(){
 async function pushRow(id){
   if(!sb) return;
   let payload;
-  if(String(id).indexOf("__cfg__:")===0){ const slug=id.split(":")[1]; payload={id,status:null,nota:msgDe(slug),tel_usado:null,atualizado:nowISO()}; }
+  if(String(id).indexOf("__cfg__:")===0){ const key=id.slice(8); payload={id,status:null,nota:(cfgMsgs[key]!=null?cfgMsgs[key]:""),tel_usado:null,atualizado:nowISO()}; }
   else { const r=reg(id); payload={id,status:r.status,nota:r.nota||"",tel_usado:r.telUsado||null,atualizado:r.atualizado||nowISO()}; }
   setSync("syncing");
   try{ const {error}=await sb.from("progresso").upsert(payload); if(error) throw error; delete pending[id]; savePending(); if(Object.keys(pending).length===0)setSync("synced"); else flushPending(); }
@@ -219,7 +260,7 @@ async function carregarDoBanco(){
         id:r.id, matricula:r.matricula||"", nome:r.nome||"",
         telefones:(r.telefones||"").split(" | ").map(s=>s.trim()).filter(Boolean),
         email:r.email||"", cidade:r.cidade||"", vezes:r.vezes||"",
-        data_entrada:r.data_entrada||"", data_eliminacao:r.data_eliminacao||"", lista:r.lista||""
+        data_entrada:r.data_entrada||"", data_eliminacao:r.data_eliminacao||"", lista:r.lista||"", campanha:r.campanha||"reativacao"
       });
     }
     FONTE={ vendedores:vend.map(v=>({slug:v.slug,nome:v.nome})), contatos };
@@ -229,6 +270,86 @@ async function carregarDoBanco(){
     salvarCache(FONTE);
     render();
   }catch(e){ /* sem rede / erro: mantém o que já está em memória (cache ou semente) */ }
+}
+
+// ---------------- indicados: sincronização ----------------
+async function pushInd(id){
+  if(!sb){ setSync("offline"); return; }
+  const p=indPending[id]; if(!p) return;
+  setSync("syncing");
+  try{
+    if(p.op==="del"){ const {error}=await sb.from("indicados").delete().eq("id",id); if(error) throw error; }
+    else { const {error}=await sb.from("indicados").upsert(p.row); if(error) throw error; }
+    delete indPending[id]; salvarIndPending();
+    if(!Object.keys(indPending).length && !Object.keys(pending).length) setSync("synced"); else flushIndPending();
+  }catch(e){ setSync("offline"); }
+}
+async function flushIndPending(){ if(!sb)return; for(const id of Object.keys(indPending)){ await pushInd(id); } }
+function salvarIndicado(cid, indId, nome, telefone, obs){
+  const vendedor=vendAtual;
+  const arr=indicados[cid]||(indicados[cid]=[]);
+  if(indId){ const it=arr.find(x=>x.id===indId); if(it){ it.nome=nome; it.telefone=telefone; it.observacao=obs; } else indId=null; }
+  if(!indId){ indId=uuid(); arr.push({id:indId,contato_id:cid,vendedor,nome,telefone,observacao:obs}); }
+  salvarIndLocal();
+  indPending[indId]={op:"up",row:{id:indId,contato_id:cid,vendedor,nome,telefone,observacao:obs}}; salvarIndPending(); pushInd(indId);
+}
+function removerIndicado(cid, indId){
+  indicados[cid]=(indicados[cid]||[]).filter(x=>x.id!==indId); salvarIndLocal();
+  indPending[indId]={op:"del"}; salvarIndPending(); pushInd(indId);
+}
+async function carregarIndicados(){
+  if(!sb) return;
+  try{
+    const rows=await fetchAll("indicados","*","criado_em");
+    const map={};
+    rows.forEach(r=>{ (map[r.contato_id]=map[r.contato_id]||[]).push({id:r.id,contato_id:r.contato_id,vendedor:r.vendedor,nome:r.nome||"",telefone:r.telefone||"",observacao:r.observacao||""}); });
+    // reaplica pendências locais (não perder edições offline)
+    Object.keys(indPending).forEach(id=>{ const p=indPending[id];
+      Object.keys(map).forEach(cid=>{ map[cid]=map[cid].filter(x=>x.id!==id); });
+      if(p.op==="up"){ const row=p.row; (map[row.contato_id]=map[row.contato_id]||[]).push({id:row.id,contato_id:row.contato_id,vendedor:row.vendedor,nome:row.nome||"",telefone:row.telefone||"",observacao:row.observacao||""}); }
+    });
+    indicados=map; salvarIndLocal();
+    if(!telaImport) render();
+  }catch(e){ /* sem rede: mantém cache */ }
+}
+function formIndicadoHTML(cid, ind){
+  const n=ind?esc(ind.nome):"", t=ind?esc(fmtTel(ind.telefone)):"", o=ind?esc(ind.observacao||""):"", idA=ind?esc(ind.id):"";
+  return '<div class="indform">'+
+    '<input class="indf-nome" placeholder="Nome do indicado" value="'+n+'">'+
+    '<input class="indf-tel" placeholder="Telefone com DDD" inputmode="tel" value="'+t+'">'+
+    '<input class="indf-obs" placeholder="Observação (opcional)" value="'+o+'">'+
+    '<div class="indform-btns"><button class="indf-save" data-act="indsave" data-id="'+esc(cid)+'" data-ind="'+idA+'">Salvar</button>'+
+    '<button class="indf-cancel" data-act="indcancel">Cancelar</button></div></div>';
+}
+function indicadosHTML(k){
+  const lst=indDe(k.id);
+  const itens=lst.map(ind=>{
+    if(indForm&&indForm.cid===k.id&&indForm.id===ind.id) return formIndicadoHTML(k.id,ind);
+    return '<div class="indrow"><div><b>'+esc(nomeProper(ind.nome))+'</b>'+(ind.telefone?' · '+esc(fmtTel(ind.telefone)):'')+(ind.observacao?'<div class="indobs">'+esc(ind.observacao)+'</div>':'')+'</div>'+
+      '<div class="indbtns"><button data-act="indedit" data-id="'+esc(k.id)+'" data-ind="'+esc(ind.id)+'">editar</button><button data-act="inddel" data-id="'+esc(k.id)+'" data-ind="'+esc(ind.id)+'">remover</button></div></div>';
+  }).join("");
+  const novo=(indForm&&indForm.cid===k.id&&indForm.id==null)?formIndicadoHTML(k.id,null):'<button class="indadd" data-act="indadd" data-id="'+esc(k.id)+'">+ Adicionar indicado</button>';
+  const st=reg(k.id).status;
+  const nudge=(st==="indicou"&&!lst.length&&!(indForm&&indForm.cid===k.id))?'<div class="indnudge">Registre quem foi indicado 👇</div>':"";
+  return '<div class="indbox"><div class="indhead">Indicados ('+lst.length+')</div>'+nudge+itens+novo+'</div>';
+}
+function ensureIndStyles(){
+  if(document.getElementById("ind-styles")) return;
+  const css=".indbox{margin-top:9px;border-top:1px dashed #e6e1d7;padding-top:9px}"+
+  ".indhead{font-size:12px;font-weight:700;color:#4a463f;margin-bottom:6px}"+
+  ".indnudge{font-size:12px;color:#16703f;background:#e3f5ea;border-radius:8px;padding:6px 9px;margin-bottom:7px;font-weight:600}"+
+  ".indrow{display:flex;justify-content:space-between;gap:8px;align-items:flex-start;background:#f7f4ee;border-radius:8px;padding:7px 9px;margin-bottom:6px;font-size:13px}"+
+  ".indobs{font-size:11.5px;color:#7a756b;margin-top:2px;white-space:pre-wrap}"+
+  ".indbtns{display:flex;gap:10px;flex:0 0 auto}"+
+  ".indbtns button{font-size:11.5px;color:#8a7a5a;font-weight:600}"+
+  ".indadd{font-size:13px;color:#a8895c;font-weight:700;padding:4px 0}"+
+  ".indform{background:#fff;border:1px solid #e3ddd2;border-radius:10px;padding:9px;margin-bottom:6px;display:flex;flex-direction:column;gap:6px}"+
+  ".indform input{border:1px solid #e3ddd2;border-radius:7px;padding:9px 10px;font-size:14px}"+
+  ".indform-btns{display:flex;gap:8px}"+
+  ".indform-btns button{border-radius:7px;padding:8px 14px;font-size:13.5px;font-weight:600}"+
+  ".indf-save{background:var(--ink);color:#fff}"+
+  ".indf-cancel{background:#efece6;color:#5a564e}";
+  const st=document.createElement("style"); st.id="ind-styles"; st.textContent=css; document.head.appendChild(st);
 }
 
 // ---------------- icons ----------------
@@ -261,7 +382,14 @@ function renderPicker(){
 function render(){
   if(telaImport){ return; }   // não sair da tela de importar/migrar por atualização em segundo plano
   if(!vendAtual){ renderPicker(); return; }
-  const slug=vendAtual, arr=contatosDe(slug), s=statsDe(slug);
+  ensureIndStyles();
+  const slug=vendAtual, arr=contatosCamp(slug), s=statsDe(slug,arr);
+  const camps=campanhasDe(slug);
+  const campToggle = camps.length<2 ? "" :
+    '<div style="display:flex;gap:6px;margin:8px 0 2px">'+
+    ["reativacao","indicacao"].filter(c=>camps.includes(c)).map(c=>{ const on=campanhaAtual===c;
+      return '<button data-act="camp" data-v="'+c+'" style="flex:1;border:1px solid '+(on?"var(--ink)":"#e6e1d7")+';background:'+(on?"var(--ink)":"#fff")+';color:'+(on?"#fff":"#5a564e")+';border-radius:10px;padding:8px 10px;font-size:12.5px;font-weight:600">'+esc(CAMPANHAS[c].label)+'</button>';
+    }).join("")+'</div>';
   const segs=STATUSES.filter(x=>x.id!=="novo").map(x=>{ const w=s.total?(s[x.id]/s.total)*100:0; return w>0?'<div style="width:'+w+'%;background:'+x.dot+'"></div>':'' }).join("");
   const legend=STATUSES.map(x=>'<div class="it"><span class="dot" style="background:'+x.dot+'"></span><b>'+s[x.id]+'</b> '+x.label+'</div>').join("");
   const chips='<button class="chip'+(filtroStatus==="novo"?" on":"")+'" data-act="fstatus" data-v="novo"><span class="dot" style="background:#9aa0a6"></span>A fazer ('+s.novo+')</button>'+
@@ -270,6 +398,7 @@ function render(){
   document.getElementById("app").innerHTML =
   '<header class="top"><div class="htop">'+
     '<div class="eyebrow">'+esc(VMAP[slug]||slug)+' <button class="trocar" data-act="trocar">trocar</button> <span id="syncpill" class="sync '+syncState+'">'+syncLabel(syncState)+'</span></div>'+
+    campToggle+
     '<h1 class="count num">'+s.trabalhados+'<span class="of"> / '+s.total+'</span></h1>'+
     '<div class="sub">contatos trabalhados</div>'+
     '<div class="topbtns">'+
@@ -287,31 +416,32 @@ function render(){
   if(b){ b.oninput=()=>{ busca=b.value; const m=document.querySelector("main"); if(m)m.innerHTML=listaHTML(slug); }; }
 }
 function listaSelect(slug){
-  const listas=[...new Set(contatosDe(slug).map(k=>k.lista))];
+  const listas=[...new Set(contatosCamp(slug).map(k=>k.lista))];
   if(listas.length<=1) return "";
   let o='<option value="todas">Todas as listas</option>';
   listas.forEach(l=>{ o+='<option value="'+esc(l)+'"'+(filtroLista===l?" selected":"")+'>'+esc(l)+'</option>'; });
   return '<div class="row2"><select data-act="flista">'+o+'</select></div>';
 }
-function filtrar(slug){ const q=busca.trim().toLowerCase(); return contatosDe(slug).filter(k=>{ const st=reg(k.id).status; if(filtroStatus!=="todos"&&st!==filtroStatus)return false; if(filtroLista!=="todas"&&k.lista!==filtroLista)return false; if(q){ const hay=(k.nome+" "+k.matricula+" "+k.telefones.join(" ")+" "+(k.cidade||"")).toLowerCase(); if(!hay.includes(q))return false; } return true; }); }
+function filtrar(slug){ const q=busca.trim().toLowerCase(); return contatosCamp(slug).filter(k=>{ const st=reg(k.id).status; if(filtroStatus!=="todos"&&st!==filtroStatus)return false; if(filtroLista!=="todas"&&k.lista!==filtroLista)return false; if(q){ const hay=(k.nome+" "+k.matricula+" "+k.telefones.join(" ")+" "+(k.cidade||"")).toLowerCase(); if(!hay.includes(q))return false; } return true; }); }
 function listaHTML(slug){
-  const arr=contatosDe(slug);
+  const arr=contatosCamp(slug);
   if(!arr.length) return '<div class="empty">Esse vendedor ainda não tem lista pra trabalhar.</div>';
   const lista=filtrar(slug);
   if(lista.length) return lista.map(k=>cardHTML(k,slug)).join("");
   if(filtroStatus==="novo"&&!busca) return '<div class="empty done">🎉 Lista zerada! Todos os contatos foram trabalhados.</div>';
   return '<div class="empty">Nenhum contato aqui. Toque em "Todos" ou ajuste a busca.</div>';
 }
-function cfgHTML(slug){ return '<div class="cfg"><div class="lbl">Mensagem padrão do WhatsApp <button data-act="togglecfg" style="color:#9a958b;font-size:18px;line-height:1">&times;</button></div><textarea data-act="msg" rows="3">'+esc(msgDe(slug))+'</textarea><div class="hint">Use <code>{nome}</code> (nome do cliente) e <code>{vendedor}</code> (seu nome).</div></div>'; }
+function cfgHTML(slug){ return '<div class="cfg"><div class="lbl">Mensagem padrão do WhatsApp · '+esc(CAMPANHAS[campanhaAtual].label)+' <button data-act="togglecfg" style="color:#9a958b;font-size:18px;line-height:1">&times;</button></div><textarea data-act="msg" rows="3">'+esc(msgDe(slug))+'</textarea><div class="hint">Use <code>{nome}</code> (nome do cliente) e <code>{vendedor}</code> (seu nome).</div></div>'; }
 function cardHTML(k,slug){
   const r=reg(k.id); const st=ST[r.status]||ST.novo; const susp=telSuspeito(k.telefones);
-  const badges='<span class="badge" style="color:'+st.fg+';background:'+st.bg+'">'+st.label+'</span>'+(k.vezes==="2x"?'<span class="badge" style="color:#8a5a12;background:#fbf1df">2ª reativação</span>':'');
-  const meta='<div class="meta"><span>#'+esc(k.matricula)+'</span>'+(k.cidade?'<span>'+esc(nomeProper(k.cidade))+'</span>':'')+(k.data_eliminacao?'<span>saiu '+esc(k.data_eliminacao)+'</span>':'')+'<span class="lista">'+esc(k.lista)+'</span></div>';
+  const ehIndic=(k.campanha||"reativacao")==="indicacao";
+  const badges='<span class="badge" style="color:'+st.fg+';background:'+st.bg+'">'+st.label+'</span>'+((!ehIndic&&k.vezes==="2x")?'<span class="badge" style="color:#8a5a12;background:#fbf1df">2ª reativação</span>':'');
+  const meta='<div class="meta"><span>#'+esc(k.matricula)+'</span>'+(k.cidade?'<span>'+esc(nomeProper(k.cidade))+'</span>':'')+((!ehIndic&&k.data_eliminacao)?'<span>saiu '+esc(k.data_eliminacao)+'</span>':'')+'<span class="lista">'+esc(k.lista)+'</span></div>';
   const tels = k.telefones.length ? k.telefones.map(tel=>{ const used=r.telUsado===tel?'<span class="usado">✓ usado</span>':''; return '<div class="tel"><a class="wa" href="'+waLink(tel,k.nome,slug)+'" target="_blank" rel="noreferrer" data-act="wa" data-id="'+k.id+'" data-tel="'+tel+'">'+ICN.wa+' WhatsApp</a><span class="telnum">'+fmtTel(tel)+'</span><button class="cpy" data-act="copy" data-tel="'+tel+'">'+ICN.copy+' Copiar</button>'+used+'</div>'; }).join("") : '';
   const stbtns=STATUSES.map(x=>{ const on=r.status===x.id; return '<button class="stbtn" data-act="status" data-id="'+k.id+'" data-v="'+x.id+'" style="background:'+(on?x.dot:x.bg)+';color:'+(on?"#fff":x.fg)+';border-color:'+(on?x.dot:"transparent")+'">'+x.label+'</button>'; }).join("");
   const noteOpen=!!r.nota;
   const note='<div class="noterow">'+(noteOpen?'<textarea data-act="nota" data-id="'+k.id+'" rows="2" placeholder="O que aconteceu...">'+esc(r.nota)+'</textarea>':'<button class="noteopen" data-act="opennote" data-id="'+k.id+'">+ Anotar o que aconteceu</button>')+(r.atualizado?'<div class="upd">Atualizado '+fmtData(r.atualizado)+'</div>':'')+'</div>';
-  return '<div class="card" id="card-'+esc(k.id)+'" style="border-color:'+(r.status!=="novo"?st.ring:"var(--line)")+';border-left-color:'+st.dot+'"><div class="chead"><span class="nome">'+esc(nomeProper(k.nome))+'</span>'+badges+'</div>'+meta+(susp?'<div class="warn">⚠ Número fora do padrão — confira antes de enviar.</div>':"")+tels+'<div class="stbtns">'+stbtns+'</div>'+note+'</div>';
+  return '<div class="card" id="card-'+esc(k.id)+'" style="border-color:'+(r.status!=="novo"?st.ring:"var(--line)")+';border-left-color:'+st.dot+'"><div class="chead"><span class="nome">'+esc(nomeProper(k.nome))+'</span>'+badges+'</div>'+meta+(susp?'<div class="warn">⚠ Número fora do padrão — confira antes de enviar.</div>':"")+tels+'<div class="stbtns">'+stbtns+'</div>'+note+(ehIndic?indicadosHTML(k):"")+'</div>';
 }
 
 // ---------------- ações ----------------
@@ -330,9 +460,12 @@ function toast(msg){ const t=document.getElementById("toast"); t.innerHTML='<spa
 
 // ---------------- CSV ----------------
 function exportCSV(){
-  const slug=vendAtual, arr=contatosDe(slug);
+  const slug=vendAtual, arr=contatosCamp(slug), ehIndic=campanhaAtual==="indicacao";
   const head=["matricula","nome","telefones","cidade","lista","vezes","data_entrada","data_eliminacao","status","anotacao","atualizado_em"];
-  const rows=arr.map(k=>{ const r=reg(k.id); const at=r.atualizado?fmtData(r.atualizado):""; const vals=[k.matricula,nomeProper(k.nome),k.telefones.map(fmtTel).join(" | "),k.cidade||"",k.lista,k.vezes||"",k.data_entrada||"",k.data_eliminacao||"",(ST[r.status]||{}).label||"",(r.nota||"").replace(/\n/g," "),at]; return vals.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(","); });
+  if(ehIndic) head.push("indicados");
+  const rows=arr.map(k=>{ const r=reg(k.id); const at=r.atualizado?fmtData(r.atualizado):""; const vals=[k.matricula,nomeProper(k.nome),k.telefones.map(fmtTel).join(" | "),k.cidade||"",k.lista,k.vezes||"",k.data_entrada||"",k.data_eliminacao||"",(ST[r.status]||{}).label||"",(r.nota||"").replace(/\n/g," "),at];
+    if(ehIndic) vals.push(indDe(k.id).map(ind=>nomeProper(ind.nome)+(ind.telefone?" ("+fmtTel(ind.telefone)+")":"")+(ind.observacao?" ["+ind.observacao+"]":"")).join(" ; "));
+    return vals.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(","); });
   const csv="\uFEFF"+[head.join(","),...rows].join("\n");
   const blob=new Blob([csv],{type:"text/csv;charset=utf-8;"}); const url=URL.createObjectURL(blob); const a=document.createElement("a"); a.href=url; a.download="relatorio_"+slug+"_"+new Date().toISOString().slice(0,10)+".csv"; a.click(); setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
@@ -340,7 +473,7 @@ function exportCSV(){
 // ---------------- RELATÓRIO PDF ----------------
 function gerarPDF(){
   if(!window.jspdf||!window.jspdf.jsPDF){ toast("Carregando gerador… tente de novo em instantes"); return; }
-  const slug=vendAtual, arr=contatosDe(slug), nomeVend=VMAP[slug]||slug, s=statsDe(slug);
+  const slug=vendAtual, arr=contatosCamp(slug), nomeVend=VMAP[slug]||slug, s=statsDe(slug,arr);
   const { jsPDF } = window.jspdf;
   const doc=new jsPDF({unit:"pt",format:"a4"});
   const W=doc.internal.pageSize.getWidth(), H=doc.internal.pageSize.getHeight();
@@ -348,7 +481,7 @@ function gerarPDF(){
 
   // ----- capa -----
   doc.setFont("helvetica","bold"); doc.setFontSize(26); doc.setTextColor(28,27,25);
-  doc.text("Relatório de Reativações", W/2, 110, {align:"center"});
+  doc.text(CAMPANHAS[campanhaAtual].relTitulo, W/2, 110, {align:"center"});
   doc.setFont("helvetica","normal"); doc.setFontSize(12); doc.setTextColor(120,117,107);
   doc.text(CLUBE, W/2, 134, {align:"center"});
   doc.setFontSize(10); doc.text(dataStr, W/2, 152, {align:"center"});
@@ -391,12 +524,31 @@ function gerarPDF(){
     });
   });
 
+  // ----- seção "PESSOAS INDICADAS" (só na campanha de indicação — é o entregável) -----
+  if(campanhaAtual==="indicacao"){
+    const linhas=[];
+    arr.forEach(k=>{ indDe(k.id).forEach(ind=>{ linhas.push([nomeProper(ind.nome), ind.telefone?fmtTel(ind.telefone):"", nomeProper(k.nome), ind.observacao||""]); }); });
+    doc.addPage();
+    const body=linhas.length ? linhas.map((r,i)=>[String(i+1),r[0],r[1],r[2],r[3]]) : [["—","(nenhum indicado registrado ainda)","","",""]];
+    doc.autoTable({
+      head:[["#","Nome do indicado","Telefone","Indicado por","Observação"]],
+      body,
+      startY:96,
+      margin:{top:90,left:40,right:40,bottom:48},
+      styles:{font:"helvetica",fontSize:8.5,cellPadding:4,valign:"top",textColor:[40,40,38],lineColor:[236,232,224],lineWidth:0.4},
+      headStyles:{fillColor:[22,112,63],textColor:255,fontSize:8.5,halign:"left"},
+      alternateRowStyles:{fillColor:[247,251,248]},
+      columnStyles:{0:{cellWidth:24,halign:"right"},1:{cellWidth:150},2:{cellWidth:90},3:{cellWidth:120},4:{cellWidth:"auto"}},
+      didDrawPage:()=>{ doc.setFont("helvetica","bold"); doc.setFontSize(15); doc.setTextColor(22,112,63); doc.text("PESSOAS INDICADAS", 40, 50); doc.setFont("helvetica","normal"); doc.setFontSize(9.5); doc.setTextColor(120,117,107); doc.text(linhas.length+" indicado(s) no total", 40, 66); }
+    });
+  }
+
   // ----- rodapés + paginação -----
   const np=doc.internal.getNumberOfPages();
   for(let i=1;i<=np;i++){ doc.setPage(i); doc.setFont("helvetica","normal"); doc.setFontSize(8); doc.setTextColor(150,150,140);
     if(i>1){ doc.text(nomeVend+"   ·   "+new Date().toLocaleDateString("pt-BR"), 40, H-24); doc.text("Pág "+i+"/"+np, W-40, H-24, {align:"right"}); }
   }
-  doc.save("Relatorio_Reativacoes_"+slug+"_"+new Date().toISOString().slice(0,10)+".pdf");
+  doc.save((campanhaAtual==="indicacao"?"Relatorio_Indicacoes_":"Relatorio_Reativacoes_")+slug+"_"+new Date().toISOString().slice(0,10)+".pdf");
 }
 function drawSecHeader(doc,cur,W){ const st=ST[cur.stId]; const g=REP_GLYPH[cur.stId]||"";
   doc.setFont("helvetica","bold"); doc.setFontSize(15); doc.setTextColor(...hexRGB(st.fg));
@@ -411,9 +563,10 @@ function hexRGB(h){ h=h.replace("#",""); return [parseInt(h.slice(0,2),16),parse
 // ---------------- eventos ----------------
 document.addEventListener("click",e=>{
   const el=e.target.closest("[data-act]"); if(!el) return;
-  const act=el.dataset.act, id=el.dataset.id, v=el.dataset.v, tel=el.dataset.tel, slug=el.dataset.slug;
+  const act=el.dataset.act, id=el.dataset.id, v=el.dataset.v, tel=el.dataset.tel, slug=el.dataset.slug, ind=el.dataset.ind;
   if(act==="pick"){ irPara(slug); }
-  else if(act==="trocar"){ vendAtual=null; try{history.replaceState(null,"",location.pathname);}catch(_){ } filtroStatus="novo"; busca=""; render(); }
+  else if(act==="trocar"){ vendAtual=null; aplicarCampanha("reativacao"); try{history.replaceState(null,"",location.pathname);}catch(_){ } filtroStatus="novo"; filtroLista="todas"; busca=""; render(); }
+  else if(act==="camp"){ if(v!==campanhaAtual){ aplicarCampanha(v); filtroStatus="novo"; filtroLista="todas"; busca=""; cfgOpen=false; render(); } }
   else if(act==="togglecfg"){ cfgOpen=!cfgOpen; render(); }
   else if(act==="report"){ e.preventDefault(); gerarPDF(); }
   else if(act==="csv"){ e.preventDefault(); exportCSV(); }
@@ -423,13 +576,18 @@ document.addEventListener("click",e=>{
   else if(act==="opennote"){ const cur=reg(id); estado[id]={...cur,nota:cur.nota||" "}; const m=document.querySelector("main"); if(m)m.innerHTML=listaHTML(vendAtual); const ta=document.querySelector('textarea[data-act="nota"][data-id="'+cssEsc(id)+'"]'); if(ta){ta.focus();ta.value="";} }
   else if(act==="copy"){ const t=digits(tel); navigator.clipboard&&navigator.clipboard.writeText(t).then(()=>toast("Número copiado")).catch(()=>{}); }
   else if(act==="wa"){ const cur=reg(id); const nx={...cur,telUsado:tel,atualizado:nowISO()}; if(cur.status==="novo")nx.status="sem_resposta"; estado[id]=nx; saveLocal(); pushRow(id); setTimeout(()=>{ const card=document.getElementById("card-"+cssEsc(id)); const some=(filtroStatus==="novo"&&nx.status!=="novo"); if(card&&some){card.classList.add("leaving");setTimeout(()=>render(),260);}else render(); },300); }
+  else if(act==="indadd"){ indForm={cid:id,id:null}; render(); }
+  else if(act==="indedit"){ indForm={cid:id,id:ind}; render(); }
+  else if(act==="indcancel"){ indForm=null; render(); }
+  else if(act==="inddel"){ if(window.confirm("Remover este indicado?")){ removerIndicado(id,ind); indForm=null; render(); toast("Indicado removido"); } }
+  else if(act==="indsave"){ const form=el.closest(".indform"); if(!form)return; const nome=form.querySelector(".indf-nome").value.trim(); const tel2=digits(form.querySelector(".indf-tel").value); const obs=form.querySelector(".indf-obs").value.trim(); if(!nome){ toast("Digite o nome do indicado"); return; } if(!tel2||tel2.length<10){ toast("Telefone inválido (com DDD)"); return; } salvarIndicado(id, ind||null, nome, tel2, obs); indForm=null; render(); toast("Indicado salvo"); }
 });
 document.addEventListener("change",e=>{ const el=e.target.closest("[data-act]"); if(!el)return; if(el.dataset.act==="flista"){ filtroLista=el.value; render(); } });
-document.addEventListener("input",e=>{ const el=e.target.closest("[data-act]"); if(!el)return; if(el.dataset.act==="nota"){ const id=el.dataset.id; const cur=reg(id); estado[id]={...cur,nota:el.value,atualizado:nowISO()}; clearTimeout(inT); inT=setTimeout(()=>{saveLocal();pushRow(id);},500); } else if(el.dataset.act==="msg"){ cfgMsgs[vendAtual]=el.value; clearTimeout(inT); inT=setTimeout(()=>pushRow("__cfg__:"+vendAtual),700); } });
-window.addEventListener("online",()=>{ flushPending(); pullRemote(); });
-window.addEventListener("focus",()=>{ if(sb) pullRemote(); });
+document.addEventListener("input",e=>{ const el=e.target.closest("[data-act]"); if(!el)return; if(el.dataset.act==="nota"){ const id=el.dataset.id; const cur=reg(id); estado[id]={...cur,nota:el.value,atualizado:nowISO()}; clearTimeout(inT); inT=setTimeout(()=>{saveLocal();pushRow(id);},500); } else if(el.dataset.act==="msg"){ const k=cfgKey(vendAtual,campanhaAtual); cfgMsgs[k]=el.value; clearTimeout(inT); inT=setTimeout(()=>pushRow("__cfg__:"+k),700); } });
+window.addEventListener("online",()=>{ flushPending(); flushIndPending(); pullRemote(); carregarIndicados(); });
+window.addEventListener("focus",()=>{ if(sb){ pullRemote(); carregarIndicados(); } });
 
-function irPara(slug){ if(!VMAP[slug])return; telaImport=false; vendAtual=slug; filtroStatus="novo"; busca=""; cfgOpen=false; try{history.replaceState(null,"",location.pathname+"?v="+slug);}catch(_){ } render(); }
+function irPara(slug){ if(!VMAP[slug])return; telaImport=false; vendAtual=slug; definirCampanhaPadrao(slug); filtroStatus="novo"; filtroLista="todas"; busca=""; cfgOpen=false; try{history.replaceState(null,"",location.pathname+"?v="+slug);}catch(_){ } render(); }
 
 // ---------------- migração única (?migrar=1) ----------------
 async function migrarDados(){
@@ -718,6 +876,10 @@ function renderPreview(){
       '<div class="imp-field"><label>Nome do novo vendedor</label><input id="imp-vend-nome" data-imp="vendnome" placeholder="Ex.: Maria Santos"></div>'+
       '<div class="imp-field"><label>Apelido/link (slug — sem acento, sem espaço)</label><input id="imp-vend-slug" data-imp="slugedit" placeholder="ex.: maria"></div>'+
     '</div>'+
+    '<div class="imp-field"><label>Tipo de campanha</label><div class="imp-radio">'+
+      '<label><input type="radio" name="imp-camp" value="reativacao" checked> Reativação</label>'+
+      '<label><input type="radio" name="imp-camp" value="indicacao"> Indicação</label>'+
+    '</div></div>'+
     '<div class="imp-field"><label>Rótulo da lista</label><input id="imp-lista" list="imp-listas" value="Lista 1"><datalist id="imp-listas"><option>Lista 1</option><option>Lista 2</option><option>Lista 3</option><option>Digitados</option></datalist></div>'+
     '<div class="imp-field"><label>Como gravar</label><div class="imp-radio">'+
       '<label><input type="radio" name="imp-modo" value="add" checked> Adicionar à lista do vendedor</label>'+
@@ -754,33 +916,37 @@ async function impSalvar(){
     } else { slug=sel; nome=VMAP[slug]||sel; }
     const label=(document.getElementById("imp-lista").value||"").trim()||"Lista 1";
     const modo=(document.querySelector('input[name="imp-modo"]:checked')||{}).value||"add";
+    const camp=(document.querySelector('input[name="imp-camp"]:checked')||{}).value||"reativacao";
+    const campLabel=(CAMPANHAS[camp]||CAMPANHAS.reativacao).label;
 
     btn.disabled=true; btn.textContent="Salvando…";
 
     if(modo==="replace"){
-      const {count}=await sb.from("contatos").select("id",{count:"exact",head:true}).eq("vendedor",slug);
-      const ok=window.confirm("ATENÇÃO — SUBSTITUIR\n\nIsto vai APAGAR os "+(count||0)+" contato(s) atuais de "+(nome||slug)+" e colocar "+IMP.contatos.length+" no lugar.\n\nO progresso (status e anotações) dos contatos antigos pode ser perdido.\n\nTem certeza que deseja substituir?");
+      const {count}=await sb.from("contatos").select("id",{count:"exact",head:true}).eq("vendedor",slug).eq("campanha",camp);
+      const ok=window.confirm("ATENÇÃO — SUBSTITUIR\n\nIsto vai APAGAR os "+(count||0)+" contato(s) atuais de "+(nome||slug)+" na campanha \""+campLabel+"\" e colocar "+IMP.contatos.length+" no lugar.\n\n(As listas da outra campanha NÃO são afetadas.)\n\nO progresso (status e anotações) dos contatos antigos desta campanha pode ser perdido.\n\nTem certeza que deseja substituir?");
       if(!ok) throw new Error("Cancelado. Nada foi alterado.");
     }
 
     if(novo||!VMAP[slug]){ const {error}=await sb.from("vendedores").upsert({slug,nome}); if(error) throw error; }
 
+    // no "substituir", apaga só a campanha importada ANTES de gerar os ids
+    if(modo==="replace"){ const {error}=await sb.from("contatos").delete().eq("vendedor",slug).eq("campanha",camp); if(error) throw error; log("Contatos antigos desta campanha removidos."); }
+
     const sl=slugLista(label);
-    const used=new Set();
-    if(modo==="add"){ (await idsDoVendedor(slug)).forEach(x=>used.add(x)); }
+    // semeia com TODOS os ids que restam do vendedor (as duas campanhas) para nunca colidir/sobrescrever
+    const used=new Set(); (await idsDoVendedor(slug)).forEach(x=>used.add(x));
     const rows=IMP.contatos.map(c=>{
       const base=slug+":"+(c.matricula||"sem")+":"+sl;
       let id=base, n=1; while(used.has(id)){ n++; id=base+":"+n; } used.add(id);
       return { id, vendedor:slug, matricula:c.matricula||null, nome:c.nome||null,
         telefones:(c.telefones||[]).join(" | "), email:c.email||null, cidade:c.cidade||null,
-        vezes:c.vezes||null, data_entrada:c.data_entrada||null, data_eliminacao:c.data_eliminacao||null, lista:label };
+        vezes:c.vezes||null, data_entrada:c.data_entrada||null, data_eliminacao:c.data_eliminacao||null, lista:label, campanha:camp };
     });
 
-    if(modo==="replace"){ const {error}=await sb.from("contatos").delete().eq("vendedor",slug); if(error) throw error; log("Contatos antigos removidos."); }
-
     for(let i=0;i<rows.length;i+=200){ const {error}=await sb.from("contatos").upsert(rows.slice(i,i+200)); if(error) throw error; }
-    log('✅ '+rows.length+' contato(s) salvos para '+(nome||slug)+' (lista "'+label+'").');
+    log('✅ '+rows.length+' contato(s) salvos para '+(nome||slug)+' — campanha "'+campLabel+'", lista "'+label+'".');
     await carregarDoBanco();
+    await carregarIndicados();
     log("Pronto! A lista já está disponível no app.");
     btn.textContent="Concluído";
     res.innerHTML+='<button class="b-rep imp-btn" data-imp="goto" data-slug="'+esc(slug)+'" style="margin-top:10px">Abrir a lista de '+esc(nome||slug)+'</button>';
@@ -812,14 +978,16 @@ async function init(){
   if(p.get("migrar")==="1"){ renderMigracao(); return; }
   const abrirImport=p.get("importar")==="1";
   const v=p.get("v");
-  if(v&&VMAP[v]) vendAtual=v;
+  if(v&&VMAP[v]){ vendAtual=v; definirCampanhaPadrao(v); }
   render();                       // pinta já com o cache/semente (rápido, funciona offline)
   if(sb){
     await carregarDoBanco();      // atualiza a partir do banco (fonte da verdade)
     if(v&&VMAP[v]&&!vendAtual) vendAtual=v;   // caso seja vendedor novo, só conhecido após o banco
+    if(vendAtual) definirCampanhaPadrao(vendAtual);   // após o banco, a campanha do vendedor pode ter mudado
     if(abrirImport){ renderImport(); } else { render(); }
     pullRemote();
-    setInterval(()=>{ if(Object.keys(pending).length)flushPending(); },15000);
+    carregarIndicados();
+    setInterval(()=>{ if(Object.keys(pending).length)flushPending(); if(Object.keys(indPending).length)flushIndPending(); },15000);
   } else if(abrirImport){ renderImport(); }
 }
 init();
