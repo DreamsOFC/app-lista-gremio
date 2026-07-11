@@ -719,7 +719,7 @@ function parseTexto(txt){
 const HEADER_MAP=[
   ["data_entrada",["data_entrada","data entrada","dataentrada","entrada","data de entrada","admissao"]],
   ["data_eliminacao",["data_eliminacao","data eliminacao","data eliminacao","eliminacao","data de eliminacao","saida","exclusao","eliminado em"]],
-  ["matricula",["matricula","mat","registro","inscricao"]],
+  ["matricula",["matricula","mat","registro","inscricao","n","no","num","numero","codigo"]],
   ["nome",["nome","cliente","nome cliente","nome do cliente","socio"]],
   ["telefone",["telefone","telefones","tel","celular","cel","fone","contato","whatsapp","whats"]],
   ["email",["email","e mail","correio"]],
@@ -748,9 +748,13 @@ function linhaPlanilha(row,map){
 function rowsToContatos(rows){
   rows=(rows||[]).filter(r=>r&&r.some(c=>String(c==null?"":c).trim()!==""));
   if(!rows.length) return [];
-  const map=mapearColunas(rows[0].map(c=>String(c==null?"":c)));
-  const temHeader=(map.nome!==undefined||map.matricula!==undefined)&&map.telefone!==undefined;
-  if(temHeader) return rows.slice(1).map(r=>linhaPlanilha(r,map)).filter(c=>c.nome||c.matricula||c.telefones.length);
+  // procura a linha de cabeçalho nas primeiras linhas (pula título/subtítulo antes das colunas)
+  let hi=-1, map=null;
+  for(let i=0;i<Math.min(rows.length,15);i++){
+    const m=mapearColunas(rows[i].map(c=>String(c==null?"":c)));
+    if((m.nome!==undefined||m.matricula!==undefined)&&m.telefone!==undefined){ hi=i; map=m; break; }
+  }
+  if(hi>=0) return rows.slice(hi+1).map(r=>linhaPlanilha(r,map)).filter(c=>c.nome||c.matricula||c.telefones.length);
   return rows.map(r=>parseLinha(r.map(c=>String(c==null?"":c)).join(" "))).filter(Boolean);   // queda: trata como texto
 }
 async function lerArquivoPlanilha(file){
